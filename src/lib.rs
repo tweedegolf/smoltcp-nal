@@ -24,7 +24,8 @@ use embedded_nal::{TcpClientStack, UdpClientStack, UdpFullStack};
 use embedded_time::duration::Milliseconds;
 use smoltcp::{
     iface::SocketHandle,
-    socket::dhcpv4,
+    socket::{dhcpv4, udp},
+    time::Duration,
     wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr},
 };
 
@@ -47,12 +48,12 @@ pub enum NetworkError {
     NoSocket,
     DnsStart(smoltcp::socket::dns::StartQueryError),
     DnsFailure,
-    UdpConnectionFailure(smoltcp::socket::udp::BindError),
+    UdpConnectionFailure(udp::BindError),
     TcpConnectionFailure(smoltcp::socket::tcp::ConnectError),
     TcpReadFailure(smoltcp::socket::tcp::RecvError),
     TcpWriteFailure(smoltcp::socket::tcp::SendError),
-    UdpReadFailure(smoltcp::socket::udp::RecvError),
-    UdpWriteFailure(smoltcp::socket::udp::SendError),
+    UdpReadFailure(udp::RecvError),
+    UdpWriteFailure(udp::SendError),
     Unsupported,
     NotConnected,
 }
@@ -373,6 +374,46 @@ where
         &mut self.network_interface
     }
 
+    /// Access the underlying Device
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Mutably access the underlying Device
+    ///
+    /// # Note
+    /// Modification of the underlying device may unintentionally interfere with
+    /// operation of this library (e.g. through reset, modification of IP addresses, etc.). Mutable
+    /// access to the device should be done with care.
+    pub fn device_mut(&mut self) -> &mut Device {
+        &mut self.device
+    }
+
+    /// Receive data from an UDP socket without nal
+    pub fn smoltcp_recv_udp(
+        &mut self,
+        socket: &mut SocketHandle,
+        buffer: &mut [u8],
+    ) -> Result<(usize, udp::UdpMetadata), udp::RecvError> {
+        let socket: &mut udp::Socket = self.sockets.get_mut(*socket);
+        socket.recv_slice(buffer)
+    }
+
+    /// Send data over an UDP socket without nal
+    pub fn smoltcp_send_udp(
+        &mut self,
+        socket: &mut SocketHandle,
+        data: &[u8],
+        meta: impl Into<udp::UdpMetadata>,
+    ) -> Result<(), udp::SendError> {
+        let socket: &mut udp::Socket = self.sockets.get_mut(*socket);
+        socket.send_slice(data, meta)
+    }
+
+    pub fn smoltcp_poll_delay(&mut self, timestamp: smoltcp::time::Instant) -> Option<Duration> {
+        self.network_interface.poll_delay(timestamp, &self.sockets)
+    }
+
     /// Check if a port is currently in use.
     ///
     /// # Returns
@@ -527,7 +568,7 @@ where
             .ok_or(NetworkError::NoSocket)?;
 
         // Make sure the socket is in a closed state before handing it to the user.
-        let internal_socket: &mut smoltcp::socket::udp::Socket = self.sockets.get_mut(handle);
+        let internal_socket: &mut udp::Socket = self.sockets.get_mut(handle);
         internal_socket.close();
 
         Ok(UdpSocket {
@@ -568,8 +609,7 @@ where
 
         let local_endpoint = IpEndpoint::new(local_address, local_port);
 
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
+        let internal_socket: &mut udp::Socket = self.sockets.get_mut(socket.handle);
         internal_socket
             .bind(local_endpoint)
             .map_err(NetworkError::UdpConnectionFailure)?;
@@ -582,11 +622,8 @@ where
         socket: &mut UdpSocket,
         buffer: &[u8],
     ) -> embedded_nal::nb::Result<(), NetworkError> {
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
         let destination = socket.destination.ok_or(NetworkError::NotConnected)?;
-        internal_socket
-            .send_slice(buffer, destination)
+        self.smoltcp_send_udp(&mut socket.handle, buffer, destination)
             .map_err(|e| embedded_nal::nb::Error::Other(NetworkError::UdpWriteFailure(e)))
     }
 
@@ -595,10 +632,8 @@ where
         socket: &mut UdpSocket,
         buffer: &mut [u8],
     ) -> embedded_nal::nb::Result<(usize, embedded_nal::SocketAddr), NetworkError> {
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
-        let (size, source) = internal_socket
-            .recv_slice(buffer)
+        let (size, source) = self
+            .smoltcp_recv_udp(&mut socket.handle, buffer)
             .map_err(|e| embedded_nal::nb::Error::Other(NetworkError::UdpReadFailure(e)))?;
 
         let source = {
@@ -616,8 +651,7 @@ where
     }
 
     fn close(&mut self, socket: UdpSocket) -> Result<(), NetworkError> {
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
+        let internal_socket: &mut udp::Socket = self.sockets.get_mut(socket.handle);
 
         internal_socket.close();
 
@@ -646,8 +680,7 @@ where
 
         let local_endpoint = IpEndpoint::new(local_address, local_port);
 
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
+        let internal_socket: &mut udp::Socket = self.sockets.get_mut(socket.handle);
         internal_socket
             .bind(local_endpoint)
             .map_err(NetworkError::UdpConnectionFailure)?;
@@ -674,8 +707,7 @@ where
             _ => return Err(embedded_nal::nb::Error::Other(NetworkError::Unsupported)),
         };
 
-        let internal_socket: &mut smoltcp::socket::udp::Socket =
-            self.sockets.get_mut(socket.handle);
+        let internal_socket: &mut udp::Socket = self.sockets.get_mut(socket.handle);
         internal_socket
             .send_slice(buffer, destination)
             .map_err(|e| embedded_nal::nb::Error::Other(NetworkError::UdpWriteFailure(e)))
