@@ -16,6 +16,7 @@
 #![no_std]
 
 use core::convert::TryFrom;
+use core::task::Waker;
 pub use embedded_nal;
 use nanorand::Rng;
 pub use smoltcp;
@@ -397,6 +398,16 @@ where
     ) -> Result<(usize, udp::UdpMetadata), udp::RecvError> {
         let socket: &mut udp::Socket = self.sockets.get_mut(*socket);
         socket.recv_slice(buffer)
+    }
+
+    /// Register a receive waker with the given socket
+    pub fn smoltcp_register_recv_waker_udp(
+        &mut self,
+        socket: &mut SocketHandle,
+        waker: &Waker,
+    ) {
+        let socket: &mut udp::Socket = self.sockets.get_mut(*socket);
+        socket.register_recv_waker(waker)
     }
 
     /// Send data over an UDP socket without nal
